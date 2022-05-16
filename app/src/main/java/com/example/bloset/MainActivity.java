@@ -2,142 +2,249 @@ package com.example.bloset;
 
 
 import android.Manifest;
-import android.content.Intent;
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.media.ThumbnailUtils;
-import android.net.Uri;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
+import android.media.Image;
+import android.media.ImageReader;
 import android.os.Bundle;
-import android.provider.MediaStore;
-import android.view.View;
-import android.widget.Button;
-import android.widget.ImageView;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.util.Log;
+import android.util.Pair;
+import android.util.Size;
+import android.view.Surface;
+import android.view.WindowManager;
 import android.widget.TextView;
+import android.widget.Toast;
 
-import androidx.annotation.Nullable;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import android.app.Fragment;
 
-import com.example.bloset.ml.Model;
-
-import org.tensorflow.lite.DataType;
-import org.tensorflow.lite.support.tensorbuffer.TensorBuffer;
+import com.example.bloset.CameraFragment;
+import com.example.bloset.Classifier;
+import com.example.bloset.YuvToRgbConverter;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
+    public static final String TAG = "[IC]MainActivity";
 
-    Button camera, gallery;
-    ImageView imageView;
-    TextView result;
-    int imageSize = 28;
+    private static final String CAMERA_PERMISSION = Manifest.permission.CAMERA;
+    private static final int PERMISSION_REQUEST_CODE = 1;
+
+    private TextView textView;
+    private Classifier cls;
+
+    private int previewWidth = 0;
+    private int previewHeight = 0;
+    private int sensorOrientation = 0;
+
+    private Bitmap rgbFrameBitmap = null;
+
+    private HandlerThread handlerThread;
+    private Handler handler;
+
+    private boolean isProcessingFrame = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+        super.onCreate(null);
         setContentView(R.layout.activity_main);
 
-        camera = findViewById(R.id.button);
-        gallery = findViewById(R.id.button2);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        result = findViewById(R.id.result);
-        imageView = findViewById(R.id.imageView);
+        textView = findViewById(R.id.textView);
 
-        camera.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    Intent cameraIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-                    startActivity(cameraIntent);
-                } else {
-                    requestPermissions(new String[]{Manifest.permission.CAMERA}, 100);
-                }
-            }
-        });
-        gallery.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                Intent cameraIntent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-                startActivity(cameraIntent);
-            }
-        });
-    }
-
-    public void classifyImage(Bitmap image){
+        cls = new Classifier(this);
         try {
-            Model model = Model.newInstance(getApplicationContext());
+            cls.init();
+        } catch (IOException ioe) {
+            ioe.printStackTrace();
+        }
 
-            // Creates inputs for reference.
-            TensorBuffer inputFeature0 = TensorBuffer.createFixedSize(new int[]{1, 28, 28}, DataType.FLOAT32);
-            ByteBuffer byteBuffer = ByteBuffer.allocateDirect(4 * imageSize * imageSize * 3);
-            byteBuffer.order(ByteOrder.nativeOrder());
-
-            int[] intValues = new int[imageSize * imageSize];
-            image.getPixels(intValues, 0, image.getWidth(), 0, 0, image.getWidth(), image.getHeight());
-            int pixel = 0;
-            //iterate over each pixel and extract R, G, and B values. Add those values individually to the byte buffer.
-            for(int i = 0; i < imageSize; i ++){
-                for(int j = 0; j < imageSize; j++){
-                    int val = intValues[pixel++]; // RGB
-                    byteBuffer.putFloat(((val >> 16) & 0xFF) * (1.f / 1));
-                    byteBuffer.putFloat(((val >> 8) & 0xFF) * (1.f / 1));
-                    byteBuffer.putFloat((val & 0xFF) * (1.f / 1));
-                }
-            }
-
-            inputFeature0.loadBuffer(byteBuffer);
-
-            // Runs model inference and gets result.
-            Model.Outputs outputs = model.process(inputFeature0);
-            TensorBuffer outputFeature0 = outputs.getOutputFeature0AsTensorBuffer();
-
-            float[] confidences = outputFeature0.getFloatArray();
-            // find the index of the class with the biggest confidence.
-            int maxPos = 0;
-            float maxConfidence = 0;
-            for (int i = 0; i < confidences.length; i++) {
-                if (confidences[i] > maxConfidence) {
-                    maxConfidence = confidences[i];
-                    maxPos = i;
-                }
-            }
-            String[] classes = {"T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
-                    "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"};
-            result.setText(classes[maxPos]);
-
-            // Releases model resources if no longer used.
-            model.close();
-        } catch (IOException e) {
-            // TODO Handle the exception
+        if(checkSelfPermission(CAMERA_PERMISSION)
+                == PackageManager.PERMISSION_GRANTED) {
+            setFragment();
+        } else {
+            requestPermissions(new String[]{CAMERA_PERMISSION},
+                    PERMISSION_REQUEST_CODE);
         }
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        if(resultCode == RESULT_OK){
-            if(requestCode == 3){
-                Bitmap image = (Bitmap) data.getExtras().get("data");
-                int dimension = Math.min(image.getWidth(), image.getHeight());
-                image = ThumbnailUtils.extractThumbnail(image, dimension, dimension);
-                imageView.setImageBitmap(image);
+    protected synchronized void onDestroy() {
+        cls.finish();
+        super.onDestroy();
+    }
 
-                image = Bitmap.createScaledBitmap(image, imageSize, imageSize, false);
-                classifyImage(image);
-            }else{
-                Uri dat = data.getData();
-                Bitmap image = null;
-                try {
-                    image = MediaStore.Images.Media.getBitmap(this.getContentResolver(), dat);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-                imageView.setImageBitmap(image);
+    @Override
+    public synchronized void onResume() {
+        super.onResume();
 
-                image = Bitmap.createScaledBitmap(image, imageSize, imageSize, false);
-                classifyImage(image);
+        handlerThread = new HandlerThread("InferenceThread");
+        handlerThread.start();
+        handler = new Handler(handlerThread.getLooper());
+    }
+
+    @Override
+    public synchronized void onPause() {
+        handlerThread.quitSafely();
+        try {
+            handlerThread.join();
+            handlerThread = null;
+            handler = null;
+        } catch (final InterruptedException e) {
+            e.printStackTrace();
+        }
+
+        super.onPause();
+    }
+
+    @Override
+    public synchronized void onStart() {
+        super.onStart();
+    }
+
+    @Override
+    public synchronized void onStop() {
+        super.onStop();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        if(requestCode == PERMISSION_REQUEST_CODE) {
+            if(grantResults.length > 0 && allPermissionsGranted(grantResults)) {
+                setFragment();
+            } else {
+                Toast.makeText(this, "permission denied", Toast.LENGTH_LONG).show();
             }
         }
-        super.onActivityResult(requestCode, resultCode, data);
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    private boolean allPermissionsGranted(final int[] grantResults) {
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected void setFragment() {
+        Size inputSize = cls.getModelInputSize();
+        String cameraId = chooseCamera();
+
+        Log.d("inputSize", String.valueOf(inputSize.getWidth()));
+        Log.d("inputSize2", String.valueOf(inputSize.getHeight()));
+        Log.d("inputSize3", String.valueOf(cameraId.isEmpty()));
+
+        if(inputSize.getWidth() > 0 && inputSize.getHeight() > 0 && !cameraId.isEmpty()) {
+            Fragment fragment = CameraFragment.newInstance(
+                    (size, rotation) -> {
+                        previewWidth = size.getWidth();
+                        previewHeight = size.getHeight();
+                        sensorOrientation = rotation - getScreenOrientation();
+                    },
+                    reader->processImage(reader),
+                    inputSize,
+                    cameraId);
+
+            Log.d(TAG, "inputSize : " + cls.getModelInputSize() +
+                    "sensorOrientation : " + sensorOrientation);
+            getFragmentManager().beginTransaction().replace(
+                    R.id.fragment, fragment).commit();
+        } else {
+            Toast.makeText(this, "Can't find camera", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private String chooseCamera() {
+        final CameraManager manager =
+                (CameraManager)getSystemService(Context.CAMERA_SERVICE);
+        try {
+            for (final String cameraId : manager.getCameraIdList()) {
+                final CameraCharacteristics characteristics =
+                        manager.getCameraCharacteristics(cameraId);
+
+                final Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    return cameraId;
+                }
+            }
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+            Log.d("cameramanager error", "cameramanager error");
+        }
+
+        return "";
+    }
+
+    protected int getScreenOrientation() {
+        switch (getWindowManager().getDefaultDisplay().getRotation()) {
+            case Surface.ROTATION_270:
+                return 270;
+            case Surface.ROTATION_180:
+                return 180;
+            case Surface.ROTATION_90:
+                return 90;
+            default:
+                return 0;
+        }
+    }
+
+    protected void processImage(ImageReader reader) {
+        if (previewWidth == 0 || previewHeight == 0) {
+            return;
+        }
+
+        if(rgbFrameBitmap == null) {
+            rgbFrameBitmap = Bitmap.createBitmap(
+                    previewWidth,
+                    previewHeight,
+                    Bitmap.Config.ARGB_8888);
+        }
+
+        if (isProcessingFrame) {
+            return;
+        }
+
+        isProcessingFrame = true;
+
+        final Image image = reader.acquireLatestImage();
+        if (image == null) {
+            isProcessingFrame = false;
+            return;
+        }
+
+        YuvToRgbConverter.yuvToRgb(this, image, rgbFrameBitmap);
+
+        runInBackground(() -> {
+            if (cls != null && cls.isInitialized()) {
+                final Pair<String, Float> output = cls.classify(rgbFrameBitmap, sensorOrientation);
+
+                runOnUiThread(() -> {
+                    String resultStr = String.format(Locale.ENGLISH,
+                            "class : %s, prob : %.2f%%",
+                            output.first, output.second * 100);
+                    textView.setText(resultStr);
+                });
+            }
+            image.close();
+            isProcessingFrame = false;
+        });
+    }
+
+    protected synchronized void runInBackground(final Runnable r) {
+        if (handler != null) {
+            handler.post(r);
+        }
     }
 }
