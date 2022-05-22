@@ -13,11 +13,14 @@ import android.media.ImageReader;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.speech.tts.TextToSpeech;
 import android.util.Log;
 import android.util.Pair;
 import android.util.Size;
 import android.view.Surface;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,7 +35,8 @@ import com.example.bloset.YuvToRgbConverter;
 import java.io.IOException;
 import java.util.Locale;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener
+{
     public static final String TAG = "[IC]MainActivity";
 
     private static final String CAMERA_PERMISSION = Manifest.permission.CAMERA;
@@ -40,6 +44,8 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView textView;
     private Classifier cls;
+    private TextToSpeech tts;
+    private Button ttsbtn;
 
     private int previewWidth = 0;
     private int previewHeight = 0;
@@ -60,6 +66,8 @@ public class MainActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         textView = findViewById(R.id.textView);
+        tts = new TextToSpeech(this, (TextToSpeech.OnInitListener) this);
+        ttsbtn = findViewById(R.id.ttsbtn);
 
         cls = new Classifier(this);
         try {
@@ -75,6 +83,13 @@ public class MainActivity extends AppCompatActivity {
             requestPermissions(new String[]{CAMERA_PERMISSION},
                     PERMISSION_REQUEST_CODE);
         }
+
+        ttsbtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                speakOut();
+            }
+        });
     }
 
     @Override
@@ -236,6 +251,8 @@ public class MainActivity extends AppCompatActivity {
                             output.first, output.second * 100);
                     textView.setText(resultStr);
                 });
+
+
             }
             image.close();
             isProcessingFrame = false;
@@ -247,4 +264,27 @@ public class MainActivity extends AppCompatActivity {
             handler.post(r);
         }
     }
+
+    private void speakOut() {
+        CharSequence text = textView.getText();
+        tts.setPitch((float) 0.6); tts.setSpeechRate((float) 1);
+        tts.speak(text,TextToSpeech.QUEUE_FLUSH,null,"id1");
+    }
+
+
+    public void onInit(int status) {
+        if (status == TextToSpeech.SUCCESS) {
+            int result = tts.setLanguage(Locale.KOREA);
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e("TTS", "This Language is not supported");
+            } else {
+                ttsbtn.setEnabled(true);
+                speakOut();
+            }
+        } else {
+            Log.e("TTS", "Initilization Failed!");
+        }
+    }
+
+
 }
